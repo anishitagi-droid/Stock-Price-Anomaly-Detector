@@ -12,19 +12,15 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
  
  
 def fetch_stock(ticker: str, start: str, end: str | None = None) -> pd.DataFrame:
-    """Download OHLCV data for a single ticker.
- 
-    Args:
-        ticker: Stock symbol, e.g. 'AAPL'.
-        start:  Start date string 'YYYY-MM-DD'.
-        end:    End date string 'YYYY-MM-DD'. Defaults to today.
- 
-    Returns:
-        DataFrame with columns [Open, High, Low, Close, Volume].
-    """
     df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
+    
+    # Flatten MultiIndex columns (newer yfinance returns these)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [col[0] for col in df.columns]
+    
     if df.empty:
         raise ValueError(f"No data returned for ticker '{ticker}'.")
+    
     df.index.name = "Date"
     return df
  
