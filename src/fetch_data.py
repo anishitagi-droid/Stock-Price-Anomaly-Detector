@@ -1,101 +1,52 @@
-"""Module for fetching stock price data from various sources."""
-
+"""
+fetch_data.py
+Downloads OHLCV stock data using yfinance and saves raw CSVs to data/raw/.
+"""
+ 
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import Optional, List
-
-
-def get_stock_data(
-    ticker: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    interval: str = '1d'
-) -> pd.DataFrame:
-    """
-    Fetch historical stock price data using yfinance.
-    
-    Parameters:
-    -----------
-    ticker : str
-        Stock ticker symbol (e.g., 'AAPL', 'GOOGL')
-    start_date : str, optional
-        Start date in format 'YYYY-MM-DD'. Defaults to 1 year ago.
-    end_date : str, optional
-        End date in format 'YYYY-MM-DD'. Defaults to today.
-    interval : str, optional
-        Data interval ('1m', '5m', '15m', '30m', '60m', '1d', '1wk', '1mo')
-        Default is '1d' for daily data.
-    
+from pathlib import Path
+ 
+RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
+RAW_DIR.mkdir(parents=True, exist_ok=True)
+ 
+ 
+def fetch_stock(ticker: str, start: str, end: str | None = None) -> pd.DataFrame:
+    """Download OHLCV data for a single ticker.
+ 
+    Args:
+        ticker: Stock symbol, e.g. 'AAPL'.
+        start:  Start date string 'YYYY-MM-DD'.
+        end:    End date string 'YYYY-MM-DD'. Defaults to today.
+ 
     Returns:
-    --------
-    pd.DataFrame
-        DataFrame with columns: Open, High, Low, Close, Volume, Adj Close
+        DataFrame with columns [Open, High, Low, Close, Volume].
     """
-    # Set default dates if not provided
-    if end_date is None:
-        end_date = datetime.now().strftime('%Y-%m-%d')
-    if start_date is None:
-        start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-    
-    # Fetch data
-    try:
-        data = yf.download(
-            ticker,
-            start=start_date,
-            end=end_date,
-            interval=interval,
-            progress=False
-        )
-        
-        if data.empty:
-            raise ValueError(f"No data found for ticker: {ticker}")
-        
-        # Reset index to make Date a column
-        data.reset_index(inplace=True)
-        
-        return data
-    
-    except Exception as e:
-        raise Exception(f"Error fetching data for {ticker}: {str(e)}")
-
-
-def get_multiple_stocks(
-    tickers: List[str],
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None
-) -> dict:
-    """
-    Fetch data for multiple stocks.
-    
-    Parameters:
-    -----------
-    tickers : List[str]
-        List of stock ticker symbols
-    start_date : str, optional
-        Start date in format 'YYYY-MM-DD'
-    end_date : str, optional
-        End date in format 'YYYY-MM-DD'
-    
-    Returns:
-    --------
-    dict
-        Dictionary with ticker as key and DataFrame as value
-    """
-    data = {}
-    for ticker in tickers:
-        try:
-            data[ticker] = get_stock_data(ticker, start_date, end_date)
-            print(f"✓ Fetched data for {ticker}")
-        except Exception as e:
-            print(f"✗ Error fetching {ticker}: {str(e)}")
-    
-    return data
-
-
+    df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
+    if df.empty:
+        raise ValueError(f"No data returned for ticker '{ticker}'.")
+    df.index.name = "Date"
+    return df
+ 
+ 
+def save_raw(df: pd.DataFrame, ticker: str) -> Path:
+    """Save DataFrame to data/raw/<TICKER>.csv."""
+    path = RAW_DIR / f"{ticker.upper()}.csv"
+    df.to_csv(path)
+    print(f"[fetch_data] Saved {len(df)} rows → {path}")
+    return path
+ 
+ 
+def fetch_and_save(ticker: str, start: str = "2018-01-01", end: str | None = None) -> pd.DataFrame:
+    """Convenience wrapper: fetch + save, return DataFrame."""
+    df = fetch_stock(ticker, start, end)
+    save_raw(df, ticker)
+    return df
+ 
+ 
 if __name__ == "__main__":
-    # Example usage
-    df = get_stock_data('AAPL', start_date='2023-01-01', end_date='2024-01-01')
-    print(df.head())
-    print(f"\nShape: {df.shape}")
-    print(f"Date range: {df['Date'].min()} to {df['Date'].max()}")
+    # Quick smoke-test: fetch a handful of well-known tickers
+    tickers = ["AAPL", "TSLA", "SPY"]
+    for t in tickers:
+        fetch_and_save(t, start="2018-01-01")
+ 
