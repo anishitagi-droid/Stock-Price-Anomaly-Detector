@@ -11,16 +11,23 @@ RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
  
  
+import yfinance as yf
+import time
+
 def fetch_stock(ticker: str, start: str, end: str | None = None) -> pd.DataFrame:
-    df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
+    time.sleep(2)  # avoid rate limit
     
-    # Flatten MultiIndex columns (newer yfinance returns these)
+    t = yf.Ticker(ticker)
+    df = t.history(start=start, end=end, auto_adjust=True)
+    
+    # Flatten MultiIndex if present
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
     
     if df.empty:
         raise ValueError(f"No data returned for ticker '{ticker}'.")
     
+    df.index = df.index.tz_localize(None)  # remove timezone
     df.index.name = "Date"
     return df
  
