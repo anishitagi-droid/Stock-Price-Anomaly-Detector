@@ -1,23 +1,11 @@
-# Data fetching and processing
-yfinance==0.2.32
-pandas==2.0.3
-numpy==1.24.3
-
-# Machine Learning and Anomaly Detection
-scikit-learn==1.3.0
-scipy==1.11.1
-
-# Visualization
-matplotlib==3.7.2
-seaborn==0.12.2
-plotly==5.16.1
-
-# Web Application
-streamlit==1.28.0
-
-# Data analysis
-statsmodels==0.14.0
-
-# Utilities
-python-dotenv==1.0.0
-requests==2.31.0
+yfinance==0.2.40
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.4.2
+scipy==1.13.0
+matplotlib==3.8.4
+seaborn==0.13.2
+plotly==5.22.0
+streamlit==1.35.0
+nbformat==5.10.4
+ipykernel==6.29.4
