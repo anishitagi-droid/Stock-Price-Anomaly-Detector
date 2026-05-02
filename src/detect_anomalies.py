@@ -1,255 +1,239 @@
-"""Module for detecting anomalies in stock price data."""
-
-import pandas as pd
+"""
+detect_anomalies.py
+Runs multiple anomaly detection algorithms on preprocessed features
+and produces an ensemble anomaly score saved to data/processed/.
+ 
+Algorithms:
+  - Isolation Forest
+  - Local Outlier Factor (LOF)
+  - DBSCAN
+  - Z-score / IQR baseline (from preprocess)
+  - Ensemble: majority vote + mean score
+"""
+ 
 import numpy as np
+import pandas as pd
+from pathlib import Path
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
+from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
-from typing import Tuple, Dict, Optional
-
-
-def zscore_anomaly_detection(
-    data: pd.DataFrame,
-    column: str = 'Close',
-    threshold: float = 3.0
-) -> pd.DataFrame:
-    """
-    Detect anomalies using Z-score method.
-    
-    Parameters:
-    -----------
-    data : pd.DataFrame
-        Stock price data
-    column : str
-        Column to analyze for anomalies
-    threshold : float
-        Z-score threshold (default: 3.0)
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Data with 'anomaly' and 'zscore' columns
-    """
-    df = data.copy()
-    
-    if column not in df.columns:
-        raise ValueError(f"Column '{column}' not found in data")
-    
-    mean = df[column].mean()
-    std = df[column].std()
-    
-    df['zscore'] = np.abs((df[column] - mean) / std)
-    df['anomaly_zscore'] = df['zscore'] > threshold
-    
-    return df
-
-
-def moving_average_anomaly_detection(
-    data: pd.DataFrame,
-    column: str = 'Close',
-    window: int = 20,
-    threshold: float = 2.0
-) -> pd.DataFrame:
-    """
-    Detect anomalies based on deviation from moving average.
-    
-    Parameters:
-    -----------
-    data : pd.DataFrame
-        Stock price data
-    column : str
-        Column to analyze
-    window : int
-        Moving average window size
-    threshold : float
-        Standard deviation threshold
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Data with anomaly flags
-    """
-    df = data.copy()
-    
-    ma = df[column].rolling(window=window).mean()
-    std = df[column].rolling(window=window).std()
-    
-    deviation = np.abs(df[column] - ma)
-    df['anomaly_ma'] = deviation > (threshold * std)
-    
-    return df
-
-
-def isolation_forest_detection(
-    data: pd.DataFrame,
-    features: Optional[list] = None,
+ 
+# Re-use the feature list defined in preprocess
+import sys
+sys.path.append(str(Path(__file__).parent))
+from preprocess import FEATURE_COLS, PROCESSED_DIR, preprocess, load_raw
+ 
+RESULTS_DIR = PROCESSED_DIR  # save alongside other processed files
+ 
+ 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+ 
+def _scale(df: pd.DataFrame, cols: list[str]) -> np.ndarray:
+    """Return StandardScaler-transformed feature matrix."""
+    return StandardScaler().fit_transform(df[cols])
+ 
+ 
+# ── Individual detectors ──────────────────────────────────────────────────────
+ 
+def isolation_forest(
+    df: pd.DataFrame,
+    cols: list[str] = FEATURE_COLS,
     contamination: float = 0.05,
-    random_state: int = 42
-) -> pd.DataFrame:
+    random_state: int = 42,
+) -> pd.Series:
     """
-    Detect anomalies using Isolation Forest algorithm.
-    
-    Parameters:
-    -----------
-    data : pd.DataFrame
-        Stock price data
-    features : list, optional
-        Features to use for detection
-    contamination : float
-        Expected proportion of anomalies (0.0 to 0.5)
-    random_state : int
-        Random seed for reproducibility
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Data with anomaly flags
+    Returns a Series of anomaly scores (higher = more anomalous).
+    IsolationForest raw scores are negated so that high = anomalous.
+    Binary flag stored as 'if_anomaly'.
     """
-    df = data.copy()
-    
-    if features is None:
-        features = ['Daily_Return', 'Volatility'] if 'Daily_Return' in df.columns else ['Close']
-    
-    # Select available features
-    available_features = [f for f in features if f in df.columns]
-    
-    if not available_features:
-        raise ValueError(f"No available features from {features}")
-    
-    # Prepare data
-    X = df[available_features].dropna().values
-    indices = df[available_features].dropna().index
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Isolation Forest
-    iso_forest = IsolationForest(
-        contamination=contamination,
-        random_state=random_state
+    X = _scale(df, cols)
+    clf = IsolationForest(contamination=contamination, random_state=random_state, n_jobs=-1)
+    clf.fit(X)
+    # decision_function: lower (more negative) = more anomalous → negate
+    scores = -clf.decision_function(X)
+    labels = clf.predict(X)           # -1 = anomaly, 1 = normal
+    return pd.DataFrame(
+        {"if_score": scores, "if_anomaly": labels == -1},
+        index=df.index,
     )
-    predictions = iso_forest.fit_predict(X_scaled)
-    
-    # Mark anomalies (-1 = anomaly, 1 = normal)
-    df['anomaly_if'] = False
-    df.loc[indices, 'anomaly_if'] = predictions == -1
-    
-    return df
-
-
-def local_outlier_factor_detection(
-    data: pd.DataFrame,
-    features: Optional[list] = None,
+ 
+ 
+def local_outlier_factor(
+    df: pd.DataFrame,
+    cols: list[str] = FEATURE_COLS,
     n_neighbors: int = 20,
-    contamination: float = 0.05
+    contamination: float = 0.05,
 ) -> pd.DataFrame:
     """
-    Detect anomalies using Local Outlier Factor (LOF).
-    
-    Parameters:
-    -----------
-    data : pd.DataFrame
-        Stock price data
-    features : list, optional
-        Features to use for detection
-    n_neighbors : int
-        Number of neighbors for LOF
-    contamination : float
-        Expected proportion of anomalies
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Data with anomaly flags
+    LOF: higher score = more anomalous.
+    Note: LOF is transductive — no predict on new data.
     """
-    df = data.copy()
-    
-    if features is None:
-        features = ['Daily_Return', 'Volatility'] if 'Daily_Return' in df.columns else ['Close']
-    
-    available_features = [f for f in features if f in df.columns]
-    
-    if not available_features:
-        raise ValueError(f"No available features from {features}")
-    
-    # Prepare data
-    X = df[available_features].dropna().values
-    indices = df[available_features].dropna().index
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # LOF
-    lof = LocalOutlierFactor(
-        n_neighbors=n_neighbors,
-        contamination=contamination
+    X = _scale(df, cols)
+    clf = LocalOutlierFactor(n_neighbors=n_neighbors, contamination=contamination, n_jobs=-1)
+    labels = clf.fit_predict(X)       # -1 = anomaly
+    scores = -clf.negative_outlier_factor_   # negate so high = anomalous
+    return pd.DataFrame(
+        {"lof_score": scores, "lof_anomaly": labels == -1},
+        index=df.index,
     )
-    predictions = lof.fit_predict(X_scaled)
-    
-    # Mark anomalies
-    df['anomaly_lof'] = False
-    df.loc[indices, 'anomaly_lof'] = predictions == -1
-    
-    return df
-
-
-def detect_anomalies(
-    data: pd.DataFrame,
-    methods: Optional[list] = None,
-    **kwargs
+ 
+ 
+def dbscan_detector(
+    df: pd.DataFrame,
+    cols: list[str] = FEATURE_COLS,
+    eps: float = 1.5,
+    min_samples: int = 10,
 ) -> pd.DataFrame:
     """
-    Detect anomalies using multiple methods.
-    
-    Parameters:
-    -----------
-    data : pd.DataFrame
-        Stock price data
-    methods : list, optional
-        Anomaly detection methods to use
-    **kwargs
-        Additional parameters for detection methods
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Data with anomaly detection results
+    DBSCAN labels noise points (-1) as anomalies.
+    Score = 1 for anomaly, 0 for cluster member.
     """
-    if methods is None:
-        methods = ['zscore', 'isolation_forest', 'lof']
-    
-    df = data.copy()
-    
-    if 'zscore' in methods:
-        df = zscore_anomaly_detection(df, **kwargs)
-    
-    if 'moving_average' in methods:
-        df = moving_average_anomaly_detection(df, **kwargs)
-    
-    if 'isolation_forest' in methods:
-        df = isolation_forest_detection(df, **kwargs)
-    
-    if 'lof' in methods:
-        df = local_outlier_factor_detection(df, **kwargs)
-    
-    # Combined anomaly flag
-    anomaly_cols = [col for col in df.columns if col.startswith('anomaly_')]
-    if anomaly_cols:
-        df['is_anomaly'] = df[anomaly_cols].any(axis=1)
-    
-    return df
-
-
+    X = _scale(df, cols)
+    labels = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1).fit_predict(X)
+    anomaly = labels == -1
+    return pd.DataFrame(
+        {"dbscan_score": anomaly.astype(float), "dbscan_anomaly": anomaly},
+        index=df.index,
+    )
+ 
+ 
+def zscore_iqr_baseline(
+    df: pd.DataFrame,
+    z_thresh: float = 3.0,
+) -> pd.DataFrame:
+    """Reproduce the simple baseline from the EDA notebook."""
+    z_anom = df["z_score"].abs() > z_thresh
+    q1, q3 = df["return_1d"].quantile([0.25, 0.75])
+    iqr = q3 - q1
+    iqr_anom = (df["return_1d"] < q1 - 1.5 * iqr) | (df["return_1d"] > q3 + 1.5 * iqr)
+    baseline = z_anom | iqr_anom
+    return pd.DataFrame(
+        {"baseline_score": baseline.astype(float), "baseline_anomaly": baseline},
+        index=df.index,
+    )
+ 
+ 
+# ── Ensemble ──────────────────────────────────────────────────────────────────
+ 
+SCORE_COLS = ["if_score", "lof_score", "dbscan_score", "baseline_score"]
+FLAG_COLS  = ["if_anomaly", "lof_anomaly", "dbscan_anomaly", "baseline_anomaly"]
+ 
+ 
+def _minmax(s: pd.Series) -> pd.Series:
+    lo, hi = s.min(), s.max()
+    return (s - lo) / (hi - lo) if hi > lo else s * 0
+ 
+ 
+def ensemble(df_scores: pd.DataFrame, vote_threshold: int = 2) -> pd.DataFrame:
+    """
+    Combine individual detector outputs into an ensemble.
+ 
+    Args:
+        df_scores:       DataFrame containing all score + flag columns.
+        vote_threshold:  Min number of detectors that must agree to flag
+                         the point as an anomaly (default 2 out of 4).
+ 
+    Returns:
+        df_scores with added columns:
+            ensemble_score   – mean of min-max normalised individual scores (0-1)
+            vote_count       – how many detectors flagged each point
+            ensemble_anomaly – True if vote_count >= vote_threshold
+    """
+    # Normalise each score to [0, 1] before averaging
+    norm = pd.concat(
+        [_minmax(df_scores[c]).rename(c) for c in SCORE_COLS], axis=1
+    )
+    df_scores["ensemble_score"]   = norm.mean(axis=1)
+    df_scores["vote_count"]       = df_scores[FLAG_COLS].sum(axis=1)
+    df_scores["ensemble_anomaly"] = df_scores["vote_count"] >= vote_threshold
+    return df_scores
+ 
+ 
+# ── Main pipeline ─────────────────────────────────────────────────────────────
+ 
+def detect(
+    ticker: str,
+    contamination: float = 0.05,
+    vote_threshold: int = 2,
+    force_preprocess: bool = False,
+) -> pd.DataFrame:
+    """
+    Full detection pipeline for one ticker.
+ 
+    Steps:
+      1. Load (or re-generate) processed features.
+      2. Run all four detectors.
+      3. Build ensemble.
+      4. Save results to data/processed/<TICKER>_anomalies.csv.
+ 
+    Returns:
+        DataFrame with all original columns + detector scores + flags.
+    """
+    # ── 1. Load features ──────────────────────────────────────────────────────
+    proc_path = PROCESSED_DIR / f"{ticker.upper()}_processed.csv"
+    if force_preprocess or not proc_path.exists():
+        print(f"[detect] Running preprocess for {ticker}…")
+        df = preprocess(ticker)
+    else:
+        df = pd.read_csv(proc_path, index_col="Date", parse_dates=True)
+ 
+    missing = [c for c in FEATURE_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing feature columns: {missing}. Re-run preprocess.")
+ 
+    # ── 2. Run detectors ──────────────────────────────────────────────────────
+    print(f"[detect] Running detectors on {ticker} ({len(df)} rows)…")
+    results = pd.concat(
+        [
+            isolation_forest(df, contamination=contamination),
+            local_outlier_factor(df, contamination=contamination),
+            dbscan_detector(df),
+            zscore_iqr_baseline(df),
+        ],
+        axis=1,
+    )
+ 
+    # ── 3. Ensemble ───────────────────────────────────────────────────────────
+    results = ensemble(results, vote_threshold=vote_threshold)
+ 
+    # ── 4. Merge + save ───────────────────────────────────────────────────────
+    out = pd.concat([df, results], axis=1)
+    out_path = PROCESSED_DIR / f"{ticker.upper()}_anomalies.csv"
+    out.to_csv(out_path)
+ 
+    n_anom = results["ensemble_anomaly"].sum()
+    pct    = n_anom / len(out) * 100
+    print(f"[detect] Ensemble anomalies: {n_anom}/{len(out)} ({pct:.1f}%) → {out_path}")
+    return out
+ 
+ 
+def summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a tidy table of the detected anomaly dates with key metrics."""
+    cols = ["Close", "return_1d", "volume_ratio", "ensemble_score", "vote_count"] + FLAG_COLS
+    cols = [c for c in cols if c in df.columns]
+    return (
+        df.loc[df["ensemble_anomaly"], cols]
+        .sort_values("ensemble_score", ascending=False)
+        .round(4)
+    )
+ 
+ 
+# ── CLI ───────────────────────────────────────────────────────────────────────
+ 
 if __name__ == "__main__":
-    from fetch_data import get_stock_data
-    from preprocess import preprocess_data
-    
-    # Example usage
-    raw_data = get_stock_data('AAPL')
-    processed_data = preprocess_data(raw_data)
-    result = detect_anomalies(processed_data)
-    
-    print(f"Total anomalies detected: {result['is_anomaly'].sum()}")
-    print(result[result['is_anomaly']][['Date', 'Close', 'is_anomaly']].head())
+    import argparse
+ 
+    parser = argparse.ArgumentParser(description="Detect stock anomalies.")
+    parser.add_argument("tickers", nargs="+", help="Ticker symbols, e.g. AAPL TSLA")
+    parser.add_argument("--contamination", type=float, default=0.05)
+    parser.add_argument("--votes", type=int, default=2, help="Min detector votes for ensemble flag")
+    parser.add_argument("--reprocess", action="store_true", help="Force re-preprocessing")
+    args = parser.parse_args()
+ 
+    for ticker in args.tickers:
+        df_out = detect(ticker, contamination=args.contamination,
+                        vote_threshold=args.votes, force_preprocess=args.reprocess)
+        print(summary(df_out).to_string())
+        print()
+ 
