@@ -1,150 +1,99 @@
-"""Module for preprocessing and cleaning stock price data."""
-
+"""
+preprocess.py
+Loads raw OHLCV CSVs, engineers features used by anomaly detectors,
+and saves processed CSVs to data/processed/.
+"""
+ 
 import pandas as pd
 import numpy as np
-from typing import Tuple, Optional
-
-
-def preprocess_data(
-    data: pd.DataFrame,
-    handle_missing: str = 'forward_fill',
-    remove_duplicates: bool = True
-) -> pd.DataFrame:
-    """
-    Preprocess stock price data.
-    
-    Parameters:
-    -----------
-    data : pd.DataFrame
-        Raw stock price data
-    handle_missing : str
-        Method to handle missing values: 'forward_fill', 'interpolate', 'drop'
-    remove_duplicates : bool
-        Whether to remove duplicate entries
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Cleaned and preprocessed data
-    """
-    df = data.copy()
-    
-    # Ensure Date column is datetime
-    if 'Date' in df.columns:
-        df['Date'] = pd.to_datetime(df['Date'])
-        df = df.sort_values('Date').reset_index(drop=True)
-    
-    # Remove duplicates
-    if remove_duplicates:
-        df = df.drop_duplicates(subset=['Date'], keep='first')
-    
-    # Handle missing values
-    if handle_missing == 'forward_fill':
-        df = df.fillna(method='ffill').fillna(method='bfill')
-    elif handle_missing == 'interpolate':
-        df = df.interpolate(method='linear')
-    elif handle_missing == 'drop':
-        df = df.dropna()
-    
-    # Ensure numeric columns
-    numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-    
-    # Calculate additional features
-    df = calculate_features(df)
-    
+from pathlib import Path
+ 
+RAW_DIR       = Path(__file__).resolve().parents[1] / "data" / "raw"
+PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+ 
+ 
+# ── Feature engineering ──────────────────────────────────────────────────────
+ 
+def add_returns(df: pd.DataFrame) -> pd.DataFrame:
+    df["return_1d"]  = df["Close"].pct_change()
+    df["return_5d"]  = df["Close"].pct_change(5)
+    df["log_return"] = np.log(df["Close"] / df["Close"].shift(1))
     return df
-
-
-def calculate_features(data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate technical features from price data.
-    
-    Parameters:
-    -----------
-    data : pd.DataFrame
-        Preprocessed stock data
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Data with additional features
-    """
-    df = data.copy()
-    
-    if 'Close' in df.columns:
-        # Daily returns
-        df['Daily_Return'] = df['Close'].pct_change()
-        
-        # Moving averages
-        df['MA_5'] = df['Close'].rolling(window=5).mean()
-        df['MA_20'] = df['Close'].rolling(window=20).mean()
-        df['MA_50'] = df['Close'].rolling(window=50).mean()
-        
-        # Volatility
-        df['Volatility'] = df['Daily_Return'].rolling(window=20).std()
-        
-        # Price range
-        if 'High' in df.columns and 'Low' in df.columns:
-            df['Price_Range'] = df['High'] - df['Low']
-            df['Price_Range_Pct'] = (df['High'] - df['Low']) / df['Close'] * 100
-    
+ 
+ 
+def add_volatility(df: pd.DataFrame, windows: list[int] = [5, 20]) -> pd.DataFrame:
+    for w in windows:
+        df[f"volatility_{w}d"] = df["log_return"].rolling(w).std()
     return df
-
-
-def normalize_features(
-    data: pd.DataFrame,
-    method: str = 'minmax',
-    features: Optional[list] = None
-) -> pd.DataFrame:
-    """
-    Normalize specified features.
-    
-    Parameters:
-    -----------
-    data : pd.DataFrame
-        Data to normalize
-    method : str
-        Normalization method: 'minmax' or 'zscore'
-    features : list, optional
-        Features to normalize. If None, normalizes numeric columns.
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Data with normalized features
-    """
-    df = data.copy()
-    
-    if features is None:
-        features = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    if method == 'minmax':
-        for col in features:
-            if col in df.columns:
-                min_val = df[col].min()
-                max_val = df[col].max()
-                if max_val - min_val != 0:
-                    df[col] = (df[col] - min_val) / (max_val - min_val)
-    
-    elif method == 'zscore':
-        for col in features:
-            if col in df.columns:
-                mean_val = df[col].mean()
-                std_val = df[col].std()
-                if std_val != 0:
-                    df[col] = (df[col] - mean_val) / std_val
-    
+ 
+ 
+def add_volume_features(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+    df["volume_ma"]    = df["Volume"].rolling(window).mean()
+    df["volume_ratio"] = df["Volume"] / df["volume_ma"]   # spike indicator
     return df
-
-
+ 
+ 
+def add_price_features(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+    df["ma"]       = df["Close"].rolling(window).mean()
+    df["std"]      = df["Close"].rolling(window).std()
+    df["z_score"]  = (df["Close"] - df["ma"]) / df["std"]   # Bollinger z-score
+    df["range"]    = (df["High"] - df["Low"]) / df["Close"]  # intraday range %
+    return df
+ 
+ 
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply all feature engineering steps in order."""
+    df = df.copy()
+    df = add_returns(df)
+    df = add_volatility(df)
+    df = add_volume_features(df)
+    df = add_price_features(df)
+    df.dropna(inplace=True)
+    return df
+ 
+ 
+# ── I/O helpers ───────────────────────────────────────────────────────────────
+ 
+def load_raw(ticker: str) -> pd.DataFrame:
+    path = RAW_DIR / f"{ticker.upper()}.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Raw data not found: {path}. Run fetch_data.py first.")
+    df = pd.read_csv(path, index_col="Date", parse_dates=True)
+    # yfinance MultiIndex columns come out as tuples – flatten if needed
+    if isinstance(df.columns[0], tuple):
+        df.columns = [c[0] for c in df.columns]
+    return df
+ 
+ 
+def save_processed(df: pd.DataFrame, ticker: str) -> Path:
+    path = PROCESSED_DIR / f"{ticker.upper()}_processed.csv"
+    df.to_csv(path)
+    print(f"[preprocess] Saved {len(df)} rows, {len(df.columns)} cols → {path}")
+    return path
+ 
+ 
+def preprocess(ticker: str) -> pd.DataFrame:
+    """Load raw → engineer features → save processed → return DataFrame."""
+    df = load_raw(ticker)
+    df = engineer_features(df)
+    save_processed(df, ticker)
+    return df
+ 
+ 
+# ── Feature list used by detectors ───────────────────────────────────────────
+FEATURE_COLS = [
+    "return_1d", "return_5d", "log_return",
+    "volatility_5d", "volatility_20d",
+    "volume_ratio",
+    "z_score", "range",
+]
+ 
+ 
 if __name__ == "__main__":
-    from fetch_data import get_stock_data
-    
-    # Example usage
-    raw_data = get_stock_data('AAPL')
-    processed_data = preprocess_data(raw_data)
-    print(processed_data.head())
-    print(f"\nFeatures: {processed_data.columns.tolist()}")
+    for ticker in ["AAPL", "TSLA", "SPY"]:
+        try:
+            preprocess(ticker)
+        except FileNotFoundError as e:
+            print(e)
+ 
